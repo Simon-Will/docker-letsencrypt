@@ -146,6 +146,11 @@ if [ ! -f "/config/keys/letsencrypt/fullchain.pem" ]; then
   certbot certonly --non-interactive --renew-by-default --standalone --preferred-challenges tls-sni --rsa-key-size 4096 $EMAILPARAM --agree-tos $URLS
   cd /config/keys/letsencrypt || exit
   openssl pkcs12 -export -out privkey.pfx -inkey privkey.pem -in cert.pem -certfile chain.pem -passout pass:
+
+  # creating concatenated cert for HAProxy
+  mkdir -p /haproxy_certs
+  cat privkey.pem fullchain.pem  > /haproxy_certs/cert1.pem
+
 else
   chmod +x /app/le-renew.sh
   /app/le-renew.sh

@@ -106,6 +106,26 @@ else
   ln -s ../etc/letsencrypt/live/"$URL" /config/keys/letsencrypt
 fi
 
+# waiting until the container is reachable under the first of the domains
+# choose the first url to check for reachability
+echo "URLS: $URLS"
+URL_TO_BE_CHECKED=$(sed 's/^[[:space:]]*-d \([^[:space:]]\+\).*$/\1/' <<<"$URLS")
+RANDOM_STRING=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 100 ; echo '')
+WEBROOT=/tmp/www/
+ACME_DIR="$WEBROOT/.well-known/acme-challenge/"
+mkdir -p "$ACME_DIR"
+echo "$RANDOM_STRING" >"$ACME_DIR/availability_test.txt"
+
+cd "$WEBROOT"
+python2 -m SimpleHTTPServer 80 >/dev/null 2>&1 </dev/null &
+HTTPSERVER_PID="$!"
+until curl -sL "$URL_TO_BE_CHECKED/.well-known/acme-challenge/availability_test.txt" | grep -qF "$RANDOM_STRING"; do
+  echo "$URL_TO_BE_CHECKED/.well-known/acme-challenge/availability_test.txt is not yet reachable. Waiting 5 seconds ..."
+  sleep 5
+done
+echo "$URL_TO_BE_CHECKED/.well-known/acme-challenge/availability_test.txt was reached! Proceeding to get certificates."
+kill "$HTTPSERVER_PID"
+
 # checking for changes in cert variables, revoking certs if necessary
 if [ ! "$URL" = "$ORIGURL" ] || [ ! "$SUBDOMAINS" = "$ORIGSUBDOMAINS" ] || [ ! "$ONLY_SUBDOMAINS" = "$ORIGONLY_SUBDOMAINS" ] || [ ! "$EXTRA_DOMAINS" = "$ORIGEXTRA_DOMAINS" ]; then
   echo "Different sub/domains entered than what was used before. Revoking and deleting existing certificate, and an updated one will be created"

@@ -142,8 +142,14 @@ fi
 # generating certs if necessary
 if [ ! -f "/config/keys/letsencrypt/fullchain.pem" ]; then
   echo "Generating new certificate"
+  if [ "$TEST_CERT" = 'TRUE' -o "$TEST_CERT" = 'true' ]; then
+    echo 'Generating test certificate instead of real one.'
+    TEST_CERT_OPTION=' --test-cert '
+  else
+    TEST_CERT_OPTION=' '
+  fi
 # shellcheck disable=SC2086
-  certbot certonly --non-interactive --renew-by-default --standalone --preferred-challenges tls-sni --rsa-key-size 4096 $EMAILPARAM --agree-tos $URLS
+  certbot certonly $TEST_CERT_OPTION --non-interactive --renew-by-default --standalone --preferred-challenges tls-sni --rsa-key-size 4096 $EMAILPARAM --agree-tos $URLS
   cd /config/keys/letsencrypt || exit
   openssl pkcs12 -export -out privkey.pfx -inkey privkey.pem -in cert.pem -certfile chain.pem -passout pass:
 

@@ -186,6 +186,10 @@ if [ ! -f "/config/keys/letsencrypt/fullchain.pem" ]; then
   # creating concatenated cert for HAProxy
   mkdir -p /haproxy_certs
   cat privkey.pem fullchain.pem  > /haproxy_certs/cert1.pem
+  if [ -e /haproxy_certs/cert0.pem -a -e /haproxy_certs/cert1.pem ]; then
+    echo 'Removing /haproxy_certs/cert0.pem'
+    rm /haproxy_certs/cert0.pem
+  fi
 
 else
   chmod +x /app/le-renew.sh

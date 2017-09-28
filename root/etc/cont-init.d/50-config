@@ -160,8 +160,17 @@ if [ ! -f "/config/keys/letsencrypt/fullchain.pem" ]; then
     TEST_CERT_OPTION=' '
   fi
 
+  # Try several times to get a certificate
+  declare -i TRIES=1 MAX_TRIES=${MAX_TRIES:-3}
+  until [ "$TRIES" -gt "$MAX_TRIES" ]; do
 # shellcheck disable=SC2086
-  certbot certonly $TEST_CERT_OPTION --non-interactive --preferred-challenges "${PREFERRED_CHALLENGES:-http,tls-sni}" --renew-by-default --standalone --rsa-key-size 4096 $EMAILPARAM --agree-tos $URLS
+    certbot certonly $TEST_CERT_OPTION --non-interactive --preferred-challenges "${PREFERRED_CHALLENGES:-http,tls-sni}" --renew-by-default --standalone --rsa-key-size 4096 $EMAILPARAM --agree-tos $URLS
+    if [ "$?" != 0 ]; then
+      echo "Try $TRIES of $MAX_TRIES failed."
+    fi
+    ((++TRIES))
+  done
+
   cd /config/keys/letsencrypt || exit
   openssl pkcs12 -export -out privkey.pfx -inkey privkey.pem -in cert.pem -certfile chain.pem -passout pass:
 

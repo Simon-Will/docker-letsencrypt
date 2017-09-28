@@ -1,5 +1,14 @@
 #!/usr/bin/with-contenv bash
 
+# save the certificate given by the environment variable
+# HAPROXY_DEFAULT_SSL_CERT as cert0.pem
+if [ -n "$HAPROXY_DEFAULT_SSL_CERT" ]; then
+    printf 'HAPROXY_DEFAULT_SSL_CERT:\n\n%s\n\n' "$HAPROXY_DEFAULT_SSL_CERT"
+    printf '%s' "$HAPROXY_DEFAULT_SSL_CERT" >/haproxy_certs/cert0.pem
+else
+    echo "No HAPROXY_DEFAULT_SSL_CERT given"
+fi
+
 # check to make sure that the required variables are set
 # shellcheck disable=SC2153
 if [ -z "$URL" ]; then

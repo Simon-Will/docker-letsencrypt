@@ -1,114 +1,160 @@
-[linuxserverurl]: https://linuxserver.io
-[forumurl]: https://forum.linuxserver.io
-[ircurl]: https://www.linuxserver.io/irc/
-[podcasturl]: https://www.linuxserver.io/podcast/
-[appurl]: https://letsencrypt.org/
-[hub]: https://hub.docker.com/r/linuxserver/letsencrypt/
+# gorgor/docker-letsencrypt
 
-[![linuxserver.io](https://raw.githubusercontent.com/linuxserver/docker-templates/master/linuxserver.io/img/linuxserver_medium.png)][linuxserverurl]
+This project is a fork of the docker image [`linuxserver/letsencrypt`](https://hub.docker.com/r/linuxserver/letsencrypt/) with the goal of making it possible to use it behind a HAProxy service of the image [`dockercloud/haproxy`](https://hub.docker.com/r/dockercloud/haproxy/).
 
-The [LinuxServer.io][linuxserverurl] team brings you another container release featuring easy user mapping and community support. Find us for support at:
-* [forum.linuxserver.io][forumurl]
-* [IRC][ircurl] on freenode at `#linuxserver.io`
-* [Podcast][podcasturl] covers everything to do with getting the most from your Linux Server plus a focus on all things Docker and containerisation!
+The original README `README_linuxserver.md` documents all the options of the original image; this README merely documents the additional options.
 
-# linuxserver/letsencrypt
-[![](https://images.microbadger.com/badges/version/linuxserver/letsencrypt.svg)](https://microbadger.com/images/linuxserver/letsencrypt "Get your own version badge on microbadger.com")[![](https://images.microbadger.com/badges/image/linuxserver/letsencrypt.svg)](https://microbadger.com/images/linuxserver/letsencrypt "Get your own image badge on microbadger.com")[![Docker Pulls](https://img.shields.io/docker/pulls/linuxserver/letsencrypt.svg)][hub][![Docker Stars](https://img.shields.io/docker/stars/linuxserver/letsencrypt.svg)][hub][![Build Status](https://ci.linuxserver.io/buildStatus/icon?job=Docker-Builders/x86-64/x86-64-letsencrypt)](https://ci.linuxserver.io/job/Docker-Builders/job/x86-64/job/x86-64-letsencrypt/)
+## Concept
 
-This container sets up an Nginx webserver and reverse proxy with php support and a built-in letsencrypt client that automates free SSL server certificate generation and renewal processes. It also contains fail2ban for intrusion prevention.
+This Let’s Encrypt service is supposed to be run behind a HAProxy server, along with several other services for all of which HAProxy acts as the load balancer.
+That makes it necessary for the Let’s Encrypt service to be aware of the HAProxy, e.g. by waiting with its requests for certificates until a connection through HAProxy can be established and by concatenating the key and the certificate chain into a single file apt for consumption by HAProxy.
 
-[![letsencrypt](https://github.com/letsencrypt/website/raw/master/images/le-logo-wide.png)][appurl]
+## Example configuration
 
-## Usage
+Here is an example Docker Compose file for HAProxy balancing the load between three web services and this Let’s Encrypt service.
+The web services use the service [`whalesalad/docker-debug`](https://hub.docker.com/r/whalesalad/docker-debug/) because it displays helpful debugging information on port 8080.
 
+Refer to `dockercloud/haproxy`s documentation for information on how to build a Stackfile.
+
+```yaml
+---
+version: '3'
+
+services:
+
+  web1:
+    image: whalesalad/docker-debug
+    environment:
+      VIRTUAL_HOST: 'https://www1.example.com, http://www1.example.com, www1.example.com'
+      VIRTUAL_HOST_WEIGHT: '0'
+    networks:
+      proxynet:
+        aliases:
+          - web1
+
+  web2:
+    image: whalesalad/docker-debug
+    environment:
+      VIRTUAL_HOST: 'https://www2.example.com, http://www2.example.com, www2.example.com'
+      VIRTUAL_HOST_WEIGHT: '0'
+    networks:
+      proxynet:
+        aliases:
+          - web2
+
+  web3:
+    image: whalesalad/docker-debug
+    environment:
+      VIRTUAL_HOST: 'http://www3.example.com, www3.example.com'
+      VIRTUAL_HOST_WEIGHT: '0'
+    networks:
+      proxynet:
+        aliases:
+          - web3
+
+  haproxy:
+    image: dockercloud/haproxy:staging
+    environment:
+      STATS_AUTH: 'haadmin:secure'
+      EXTRA_GLOBAL_SETTINGS: 'debug'
+      CERT_FOLDER: '/certs/'
+    volumes:
+      - '/var/run/docker.sock:/var/run/docker.sock'
+      - './haproxy_certs/:/certs/'
+    ports:
+      - '80:80'
+      - '443:443'
+      - '1936:1936'  # For the statistics page
+    links:
+      - web1
+      - web2
+      - web3
+      - letsencrypt
+    networks:
+      proxynet:
+        aliases:
+          - haproxy
+
+  letsencrypt:
+    image: gorgor/docker-letsencrypt:81
+    environment:
+      EMAIL: 'admin@example.com'
+      URL: 'example.com'
+      SUBDOMAINS: 'www1,www2'  # Get certificates for www1.example.com and www2.example.com
+      ONLY_SUBDOMAINS: 'true'
+      VIRTUAL_HOST: 'http://*/.well-known/acme-challenge/*, http://*/.well-known/acme-challenge'
+      VIRTUAL_HOST_WEIGHT: '1'  # So that the VIRTUAL_HOST rules of this service have preference over those of the other services; cf. dockercloud/haproxy documentation
+      EXCLUDE_PORTS: '443'  # Not needed for the HTTP ACME challenge
+      PREFERRED_CHALLENGES: 'http'
+      HAPROXY_DEFAULT_SSL_CERT: |
+        -----BEGIN PRIVATE KEY-----
+        MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQD8UxSkXb5NzLYe
+        ZqzZC9z4ps8BA3w1lmt3BCNTWoCYhpdrqiqez0qTfHALlPhySf8pU/rTUsq7sIv+
+        yYJPnM2lAh7LlxI69ShIOC88nMYc65gOWHIiNqI88oLwYy8GM5PWG5N3uOgWCZ3w
+        MHneoCUr1DdquOpb8aSRI+eUu3QsR+jxnM103KtR4I4aLRC5KobcWfqIIkdDzEyd
+        RfzDarnODCaemmeXY/xGVwqjSg2FdPKWD0QNPX30hyXTNoIg/bdjjp3W4yufbxlK
+        a+zW5m9K1zPpderxd8Y3DagSHhu5C0mXp28NGaiZIbTbaSwkbq1o/+Z24T9ZG5DG
+        bCUy2V/LAgMBAAECggEAFvBeogq7sEr6C41+DUVc02Ymz4rHkf+YyXsg0wUZR8SE
+        o48WzNU/jGT1srfaVlmPzuwJk4ilUabdM06SgDZbI7MrpYqYZ6+998LT2IjQIfTx
+        H+y+g4m/+hZ5/Oyna8Lon8BmCa5PuyEosJtXmPuqJW/nkdY5yB4Rvfgrp4PbLeM1
+        fdRdJfSINWiEZDuJqR091IFah15bBMkaSOCjcrJclIC3O+4Lno4sujFaJ6dhuQGW
+        tMRO9lj0HshVcW6/KCZyt++gG9NRQgpfjj/4Uc5nYR4fOwYMBdk5RpiW0zDISa1N
+        gYFY52VYQjdBaO1KjP7Q2w8olqHR17nHQlVxWXnDkQKBgQD/sMWylCZpFsW7wtmh
+        Wb693nGNjN0M/hx9k/VuuxRV2P3CNFQ3un8aFk7HCFicwtdDc0HLFE4841fbkjAS
+        4JL1M5lxwBkpW061s50a9bl7Myw2lvWwO75Wa1yk6XMDfCBoQaZFOLndSS5xs9Xn
+        tCkxA9PoY++EktqoVWVUAX+x/wKBgQD8oUPxRYb8zE20JVCakel3n1Qkw+Puxbl5
+        MDQYrJEzc+0lkanOCwzJxC47e/DHn6uIMTIzKkPLQwHoIFyaGDdrCGmyr8cgXvQ8
+        YEJ2tllUtC1AeV/fc5Y9tBCux8Arz7Y8vGb6iJGmuRHJCIXMSg7AdgO0Q9Lbyv8K
+        H4e7q2p6NQKBgQD76vS9n43AmHk1JyM4/60YcOO8LP9V37++UlrMQHImquZJwzj+
+        tzanQzdWjfiQar+gaxx1s4nqH6veX8gRsUXZZH9YPYYM4zNHfrHZcCTRJ3f2SQHE
+        IvjDOIBM0t1In7FmRthE90DYr1OdHywvX6f97OGJ43yHSBE7LPfqrpdbjQKBgQDW
+        xbMhV16fZIFa+a5A+nNlg0rhxrfssqQv508i+vKmr5OZMPEPfk1s6x/y6jeVPqVx
+        r4FiBjiEgX8JfRm814GluQ1DIDVFy/QPsDZQ/k2LuXIPMiDTs0yzQHY+YQt7M6dW
+        k0VpENnix8vbASfeucc40BvuEQseWMHiNVQLtHtdUQKBgFPU3IhekthOlkspR02x
+        qAsQzHX4AEK98Ao5TGo4upRu2pCyX/GkZi53xijOegvnZ738Xak8ih0Rp24iTkNT
+        KkFIlISnMmc1QYI8SIPp0nTBHyfL9TLB6XKgNPgsDQ1wH0IrtA7xSjsqyhm0MsZr
+        fv5sOjK2yvHonAnJtavUAFRc
+        -----END PRIVATE KEY-----
+        -----BEGIN CERTIFICATE-----
+        MIIC6zCCAdOgAwIBAgIJALW8JYCigr/VMA0GCSqGSIb3DQEBCwUAMAwxCjAIBgNV
+        BAMMASowHhcNMTcwODA3MTIyNDU1WhcNMTcwOTA2MTIyNDU1WjAMMQowCAYDVQQD
+        DAEqMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA/FMUpF2+Tcy2Hmas
+        2Qvc+KbPAQN8NZZrdwQjU1qAmIaXa6oqns9Kk3xwC5T4ckn/KVP601LKu7CL/smC
+        T5zNpQIey5cSOvUoSDgvPJzGHOuYDlhyIjaiPPKC8GMvBjOT1huTd7joFgmd8DB5
+        3qAlK9Q3arjqW/GkkSPnlLt0LEfo8ZzNdNyrUeCOGi0QuSqG3Fn6iCJHQ8xMnUX8
+        w2q5zgwmnppnl2P8RlcKo0oNhXTylg9EDT199Icl0zaCIP23Y46d1uMrn28ZSmvs
+        1uZvStcz6XXq8XfGNw2oEh4buQtJl6dvDRmomSG022ksJG6taP/mduE/WRuQxmwl
+        MtlfywIDAQABo1AwTjAdBgNVHQ4EFgQU7SjW7YK+o1J2SDA9U58U6EodBMAwHwYD
+        VR0jBBgwFoAU7SjW7YK+o1J2SDA9U58U6EodBMAwDAYDVR0TBAUwAwEB/zANBgkq
+        hkiG9w0BAQsFAAOCAQEAG5BfDwPXoGwj/p5/nqlYZOioWutpSZWdmg+DjYssFYRJ
+        XNGrR8rwAMF3xkDELBQLUmFpuyoGN6BHgwWcwLLg1a8lanegbeqeBBUAYfQAdxxJ
+        C1KfXlKfZJx2y7VerGo54qV6y0djDxp01Lc8UBgaRjajD0RNsz2iaVdg4mnC3OSH
+        8QI4H6pq2WEuHn/ihfcCkUkKlmaGObEVjPPsoYkRkSLnercBFgMO648AG2nfNIKh
+        OOJnhWzyKy0Sp7FtGM1FLo7hF8tLDOi6QdgLLpsJPlM7FPVGitXmS6CJ0Xzh4zK5
+        H6kW3i7yEEcS7YQM8UoigUv0ol1gYqW8nqqgh75s4Q==
+        -----END CERTIFICATE-----
+    volumes:
+      - ./haproxy_certs:/haproxy_certs/
+      - ./etc/letsencrypt:/config/etc/letsencrypt/
+    privileged: true  # Necessary for fail2ban's access to iptables; not necessary if fail2ban is not used
+    networks:
+      proxynet:
+        aliases:
+          - letsencrypt
+
+networks:
+  proxynet:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: proxynet0
 ```
-docker create \
-  --privileged \
-  --name=letsencrypt \
-  -v <path to data>:/config \
-  -e PGID=<gid> -e PUID=<uid>  \
-  -e EMAIL=<email> \
-  -e URL=<url> \
-  -e SUBDOMAINS=<subdomains> \
-  -p 443:443 \
-  -e TZ=<timezone> \
-  linuxserver/letsencrypt
-```
 
-## Parameters
+## Environment variables
 
-`The parameters are split into two halves, separated by a colon, the left hand side representing the host and the right the container side. 
-For example with a port -p external:internal - what this shows is the port mapping from internal to external of the container.
-So -p 8080:80 would expose port 80 from inside the container to be accessible from the host's IP on port 8080
-http://192.168.x.x:8080 would show you what's running INSIDE the container on port 80.`
-
-
-* `-p 443` - the port(s)
-* `-v /config` - all the config files including the webroot reside here
-* `-e URL` - the top url you have control over ("customdomain.com" if you own it, or "customsubdomain.ddnsprovider.com" if dynamic dns)
-* `-e SUBDOMAINS` - subdomains you'd like the cert to cover (comma separated, no spaces) ie. `www,ftp,cloud`
-* `-e PGID` for GroupID - see below for explanation
-* `-e PUID` for UserID - see below for explanation
-* `-e TZ` - timezone ie. `America/New_York`  
-  
-_Optional settings:_
-* `-e EMAIL` - your e-mail address for cert registration and notifications
-* `-e DHLEVEL` - dhparams bit value (default=2048, can be set to `1024` or `4096`)
-* `-p 80` - Port 80 forwarding is optional (cert validation is done through 443)
-* `-e ONLY_SUBDOMAINS` - if you wish to get certs only for certain subdomains, but not the main domain (main domain may be hosted on another machine and cannot be validated), set this to `true`
-* `-e EXTRA_DOMAINS` - additional fully qualified domain names (comma separated, no spaces) ie. `extradomain.com,subdomain.anotherdomain.org`
-
-It is based on alpine linux with s6 overlay, for shell access whilst the container is running do `docker exec -it letsencrypt /bin/bash`.
-
-### User / Group Identifiers
-
-Sometimes when using data volumes (`-v` flags) permissions issues can arise between the host OS and the container. We avoid this issue by allowing you to specify the user `PUID` and group `PGID`. Ensure the data volume directory on the host is owned by the same user you specify and it will "just work" ™.
-
-In this instance `PUID=1001` and `PGID=1001`. To find yours use `id user` as below:
-
-```
-  $ id <dockeruser>
-    uid=1001(dockeruser) gid=1001(dockergroup) groups=1001(dockergroup)
-```
-
-## Setting up the application
-
-* Before running this container, make sure that the url and subdomains are properly forwarded to this container's host, and that port 443 is not being used by another service on the host (NAS gui, another webserver, etc.).
-* Port 443 on the internet side of the router should be forwarded to this container's port 443 (Required for letsencrypt validation)
-* `--privileged` mode is required for fail2ban to modify iptables
-* If you need a dynamic dns provider, you can use the free provider duckdns.org where the url will be `yoursubdomain.duckdns.org` and the subdomains can be `www,ftp,cloud`
-* The container detects changes to url and subdomains, revokes existing certs and generates new ones during start. It also detects changes to the DHLEVEL parameter and replaces the dhparams file.
-* If you'd like to password protect your sites, you can use htpasswd. Run the following command on your host to generate the htpasswd file `docker exec -it letsencrypt htpasswd -c /config/nginx/.htpasswd <username>`
-
-
-## Info
-
-* Shell access whilst the container is running: `docker exec -it letsencrypt /bin/bash`
-* To monitor the logs of the container in realtime: `docker logs -f letsencrypt`
-
-* container version number 
-
-`docker inspect -f '{{ index .Config.Labels "build_version" }}' letsencrypt`
-
-* image version number
-
-`docker inspect -f '{{ index .Config.Labels "build_version" }}' linuxserver/letsencrypt`
-
-## Versions
-
-+ **14.07.2017:** Enable modules dynamically in nginx.conf
-+ **06.07.2017:** Add support for multiple domains (thanks @oznu)
-+ **22.06.2017:** Add various nginx modules and enable all modules in the default nginx.conf
-+ **16.06.2017:** Update deprecated certbot option for https validation, make e-mail entry optional, update readme
-+ **05.06.2017:** Add php7-bz2
-+ **27.05.2017:** Rebase to alpine 3.6.
-+ **03.05.2017:** Fix log permissions.
-+ **18.04.2017:** Add php7-sockets, update fail2ban filter and action defaults
-+ **27.02.2017:** Add php7-dom, php7-iconv and php7-pdo_sqlite
-+ **21.02.2017:** Add php7-xml
-+ **10.02.2017:** Switch to alpine 3.5 base and php7, add php zlib module and all nginx modules
-+ **13.01.2017:** Add php5-ctype and php5-openssl
-+ **04.01.2017:** Add php5-mysqli and php5-pdo_mysql
-+ **22.11.2016:** Add gd and mcrypt packages
-+ **21.11.2016:** Add curl package
-+ **07.11.2016:** Initial Release
+|Environment Variable|Default|Description|
+|:------------------:|:-----:|:---------:|
+|`HAPROXY_DEFAULT_SSL_CERT`|–|A concatenation of SSL key and certificate chain that is going to be saved as `/haproxy_certs/cert0.pem`. This is necessary if you want to provide a self-signed default certificate as `dockercloud/haproxy` does not use its environment variable `DEFAULT_SSL_CERT` if you supply a `CERT_FOLDER`.|
+|`TEST_CERT`|–|If this variable is `TRUE`, `true` or `1`, the option `--test-cert` is given to Certbot in order to get a staging certificate from Let’s Encrypt, which is not going to count into your certificate limit. Be aware that this certificate will cause a `SEC_ERROR_UNKNOWN_ISSUER`.|
+|`MAX_TRIES`|`3`|Sometimes, HAProxy needs a few seconds to notice that the Let’s Encrypt service is listening for a connection. Therefore, `MAX_TRIES` attempts are made to get the certificate.|
+|`PREFERRED_CHALLENGES`|`http,tls-sni`|This variable specifies the preferred challenges to fulfil in order to get the certificate. Refer to [Certbot’s documentation](https://certbot.eff.org/docs/using.html#getting-certificates-and-choosing-plugins) and the [IETF ACME draft](https://tools.ietf.org/html/draft-ietf-acme-acme-07#section-8) for further information. Behind HAProxy, using `tls-sni` is not possible (at least not easily), therefore `http` is the obvious choice.|
+|`EXPAND_CERTIFICATE`|–|*Unless* this variable is `FALSE`, `false` or `0`, the option `--expand` is given to Certbot in order to expand an exisiting certificate to new domains. Specifying a false value is currently untested.|

@@ -14,7 +14,7 @@ That makes it necessary for the Let’s Encrypt service to be aware of the HAPro
 Here is an example Docker Compose file for HAProxy balancing the load between three web services and this Let’s Encrypt service.
 The web services use the service [`whalesalad/docker-debug`](https://hub.docker.com/r/whalesalad/docker-debug/) because it displays helpful debugging information on port 8080.
 
-Refer to `dockercloud/haproxy`s documentation for information on how to build a Stackfile.
+Refer to `dockercloud/haproxy`’s documentation for information on how to build a Stackfile.
 
 ```yaml
 ---
@@ -153,8 +153,8 @@ networks:
 
 |Environment Variable|Default|Description|
 |:------------------:|:-----:|:---------:|
-|`HAPROXY_DEFAULT_SSL_CERT`|–|A concatenation of SSL key and certificate chain that is going to be saved as `/haproxy_certs/cert0.pem`. This is necessary if you want to provide a self-signed default certificate as `dockercloud/haproxy` does not use its environment variable `DEFAULT_SSL_CERT` if you supply a `CERT_FOLDER`.|
-|`TEST_CERT`|–|If this variable is `TRUE`, `true` or `1`, the option `--test-cert` is given to Certbot in order to get a staging certificate from Let’s Encrypt, which is not going to count into your certificate limit. Be aware that this certificate will cause a `SEC_ERROR_UNKNOWN_ISSUER`.|
+|`HAPROXY_DEFAULT_SSL_CERT`|*None*|A concatenation of SSL key and certificate chain that is going to be saved as `/haproxy_certs/cert0.pem`. This is necessary if you want to provide a self-signed default certificate, as `dockercloud/haproxy` does not use its environment variable `DEFAULT_SSL_CERT` if you supply a `CERT_FOLDER`.|
+|`TEST_CERT`|*None*|If this variable is `TRUE`, `true` or `1`, the option `--test-cert` is given to Certbot in order to get a staging certificate from Let’s Encrypt, which is not going to count into your certificate limit. Be aware that this certificate will cause a `SEC_ERROR_UNKNOWN_ISSUER`.|
 |`MAX_TRIES`|`3`|Sometimes, HAProxy needs a few seconds to notice that the Let’s Encrypt service is listening for a connection. Therefore, `MAX_TRIES` attempts are made to get the certificate.|
-|`PREFERRED_CHALLENGES`|`http,tls-sni`|This variable specifies the preferred challenges to fulfil in order to get the certificate. Refer to [Certbot’s documentation](https://certbot.eff.org/docs/using.html#getting-certificates-and-choosing-plugins) and the [IETF ACME draft](https://tools.ietf.org/html/draft-ietf-acme-acme-07#section-8) for further information. Behind HAProxy, using `tls-sni` is not possible (at least not easily), therefore `http` is the obvious choice.|
-|`EXPAND_CERTIFICATE`|–|*Unless* this variable is `FALSE`, `false` or `0`, the option `--expand` is given to Certbot in order to expand an exisiting certificate to new domains. Specifying a false value is currently untested.|
+|`PREFERRED_CHALLENGES`|`http,tls-sni`|This variable specifies the preferred challenges to fulfil in order to get the certificate. Refer to [Certbot’s documentation](https://certbot.eff.org/docs/using.html#getting-certificates-and-choosing-plugins) and the [IETF ACME draft](https://tools.ietf.org/html/draft-ietf-acme-acme-07#section-8) for further information. Behind HAProxy, using `tls-sni` is not possible (at least not easily), therefore `http` is the obvious choice and is mentioned before `tls-sni`.|
+|`EXPAND_CERTIFICATE`|*None*|**Unless** this variable is `FALSE`, `false` or `0`, the option `--expand` is given to Certbot in order to expand an exisiting certificate to new domains. Specifying a false value is currently untested.|

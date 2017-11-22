@@ -45,30 +45,6 @@ cp /config/fail2ban/jail.local /etc/fail2ban/jail.local
 rm /etc/crontabs/*
 cp /config/crontabs/* /etc/crontabs/
 
-# create original config file if it doesn't exist
-if [ ! -f "/config/donoteditthisfile.conf" ]; then
-# shellcheck disable=SC2153
-  echo -e "ORIGURL=\"$URL\" ORIGSUBDOMAINS=\"$SUBDOMAINS\" ORIGONLY_SUBDOMAINS=\"$ONLY_SUBDOMAINS\" ORIGEXTRA_DOMAINS=\"$EXTRA_DOMAINS\" ORIGDHLEVEL=\"$DHLEVEL\"" > /config/donoteditthisfile.conf
-fi
-
-# load original config settings
-# shellcheck disable=SC1091
-. /config/donoteditthisfile.conf
-
-# compare dhparams existence and level, create if necessary
-if [ ! "$DHLEVEL" = "$ORIGDHLEVEL" ]; then
-  rm -rf /config/nginx/dhparams.pem
-  echo "DH parameters bit setting changed. Deleting old dhparams file."
-fi
-
-if [ ! -f "/config/nginx/dhparams.pem" ]; then
-  echo "Creating DH parameters for additional security. This may take a very long time. There will be another message once this process is completed"
-  openssl dhparam -out /config/nginx/dhparams.pem "$DHLEVEL"
-  echo "DH parameters successfully created - $DHLEVEL bits"
-else
-  echo "$ORIGDHLEVEL bit DH parameters present"
-fi
-
 # figuring out url only vs url & subdomains vs subdomains only
 if [ ! -z "$SUBDOMAINS" ]; then
   echo "SUBDOMAINS entered, processing"
@@ -97,6 +73,30 @@ if [ ! -z "$EXTRA_DOMAINS" ]; then
   URLS="$URLS $EXTRA_DOMAINS2"
 fi
 
+# create original config file if it doesn't exist
+if [ ! -f "/config/donoteditthisfile.conf" ]; then
+# shellcheck disable=SC2153
+  echo -e "ORIGURL=\"$URL\" ORIGSUBDOMAINS=\"$SUBDOMAINS\" ORIGONLY_SUBDOMAINS=\"$ONLY_SUBDOMAINS\" ORIGEXTRA_DOMAINS=\"$EXTRA_DOMAINS\" ORIGDHLEVEL=\"$DHLEVEL\" ORIGURLS=\"$URLS\"" > /config/donoteditthisfile.conf
+fi
+
+# load original config settings
+# shellcheck disable=SC1091
+. /config/donoteditthisfile.conf
+
+# compare dhparams existence and level, create if necessary
+if [ ! "$DHLEVEL" = "$ORIGDHLEVEL" ]; then
+  rm -rf /config/nginx/dhparams.pem
+  echo "DH parameters bit setting changed. Deleting old dhparams file."
+fi
+
+if [ ! -f "/config/nginx/dhparams.pem" ]; then
+  echo "Creating DH parameters for additional security. This may take a very long time. There will be another message once this process is completed"
+  openssl dhparam -out /config/nginx/dhparams.pem "$DHLEVEL"
+  echo "DH parameters successfully created - $DHLEVEL bits"
+else
+  echo "$ORIGDHLEVEL bit DH parameters present"
+fi
+
 # figuring out whether to use e-mail and which
 if [[ $EMAIL == *@* ]]; then
   echo "E-mail address entered: ${EMAIL}"
@@ -108,11 +108,24 @@ fi
 
 # setting the symlink for key location
 rm -rf /config/keys/letsencrypt
-if [ "$ONLY_SUBDOMAINS" = "true" ]; then
-  DOMAIN="$(echo "$SUBDOMAINS" | tr ',' ' ' | awk '{print $1}').${URL}"
-  ln -s ../etc/letsencrypt/live/"$DOMAIN" /config/keys/letsencrypt
+# Get all certificate directories sorted from newest to oldest
+CERT_DIRS=$(find /config/etc/letsencrypt/live/ -mindepth 1 -maxdepth 1 -type d -exec stat -c '%Y %n' {} \; \
+  | sort -rn \
+  | cut -d' ' -f2- \
+  | xargs -n1 -IDIR readlink -f 'DIR')
+if [ -n "$CERT_DIRS" ]; then
+  # There is at least one directory in /config/etc/letsencrypt/live/
+  # Choose the newest one
+  NEWEST_CERT_DIR=$(head -n1 <<<"$CERT_DIRS")
+  ln -s "$NEWEST_CERT_DIR" /config/keys/letsencrypt
 else
-  ln -s ../etc/letsencrypt/live/"$URL" /config/keys/letsencrypt
+  # There are no certificate directories yet. Use the CN as Let’s Encrypt is going to create that directory.
+  if [ "$ONLY_SUBDOMAINS" = "true" ]; then
+    DOMAIN="$(echo "$SUBDOMAINS" | tr ',' ' ' | awk '{print $1}').${URL}"
+    ln -s ../etc/letsencrypt/live/"$DOMAIN" /config/keys/letsencrypt
+  else
+    ln -s ../etc/letsencrypt/live/"$URL" /config/keys/letsencrypt
+  fi
 fi
 
 # waiting until the container is reachable under the first of the domains
@@ -120,37 +133,99 @@ fi
 echo "URLS: $URLS"
 URL_TO_BE_CHECKED=$(sed 's/^[[:space:]]*-d \([^[:space:]]\+\).*$/\1/' <<<"$URLS")
 RANDOM_STRING=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 100 ; echo '')
-WEBROOT=/tmp/www/
+WEBROOT=/var/www/
 ACME_DIR="$WEBROOT/.well-known/acme-challenge/"
 mkdir -p "$ACME_DIR"
+
+WEBLOGDIR=/var/log/pythonhttpserver/
+mkdir -p "$WEBLOGDIR"
+
 echo "$RANDOM_STRING" >"$ACME_DIR/availability_test.txt"
 
 cd "$WEBROOT"
-python2 -m SimpleHTTPServer 80 >/dev/null 2>&1 </dev/null &
+python2 -m SimpleHTTPServer 80 >"$WEBLOGDIR/stdout.log" 2>"$WEBLOGDIR/stderr.log" </dev/null &
 HTTPSERVER_PID="$!"
 until curl -sL "$URL_TO_BE_CHECKED/.well-known/acme-challenge/availability_test.txt" | grep -qF "$RANDOM_STRING"; do
   echo "$URL_TO_BE_CHECKED/.well-known/acme-challenge/availability_test.txt is not yet reachable. Waiting 5 seconds ..."
   sleep 5
 done
 echo "$URL_TO_BE_CHECKED/.well-known/acme-challenge/availability_test.txt was reached! Proceeding to get certificates."
-kill "$HTTPSERVER_PID"
 
-# checking for changes in cert variables, revoking certs if necessary
-if [ ! "$URL" = "$ORIGURL" ] || [ ! "$SUBDOMAINS" = "$ORIGSUBDOMAINS" ] || [ ! "$ONLY_SUBDOMAINS" = "$ORIGONLY_SUBDOMAINS" ] || [ ! "$EXTRA_DOMAINS" = "$ORIGEXTRA_DOMAINS" ]; then
-  echo "Different sub/domains entered than what was used before. Revoking and deleting existing certificate, and an updated one will be created"
-  if [ "$ORIGONLY_SUBDOMAINS" = "true" ]; then
-    ORIGDOMAIN="$(echo "$ORIGSUBDOMAINS" | tr ',' ' ' | awk '{print $1}').${ORIGURL}"
-    certbot revoke --non-interactive --cert-path /config/etc/letsencrypt/live/"$ORIGDOMAIN"/fullchain.pem
-  else
-    certbot revoke --non-interactive --cert-path /config/etc/letsencrypt/live/"$ORIGURL"/fullchain.pem
-  fi
-  rm -rf /config/etc
-  mkdir -p /config/etc/letsencrypt
-fi
+clean_urls() {
+  # Remove the -d parts of the URLS string.
+  local urls="$1"
+  sed -e 's/ -d / /g' -e 's/\s\+/\n/g' <<<" $urls" | grep -v '^\s*$'
+}
 
-# generating certs if necessary
-if [ ! -f "/config/keys/letsencrypt/fullchain.pem" ]; then
-  echo "Generating new certificate"
+equalset() {
+  # Test if all of the lines in $1 occur in $2 and vice versa.
+  # If this is the case, return 0, i.e. true
+  [ -z "$(comm -3 <(sort -u <<<"$1") <(sort -u <<<"$2"))" ]
+}
+
+subset() {
+  # Test if all of the lines in $1 occur in $2.
+  # If this is the case, return 0, i.e. true
+  [ -z "$(comm -23 <(sort -u <<<"$1") <(sort -u <<<"$2"))" ]
+}
+
+diffset() {
+  grep -xvFf <(echo "$2") <<<"$1"
+}
+
+reorder_urls() {
+  local all_urls="$1" correct_urls="$2"
+  python -c 'import sys
+all = set(url.strip() for url in sys.argv[1].split("\n"))
+correct = [url.strip() for url in sys.argv[2].split("\n")]
+collected = []
+
+for url in correct:
+  if url in all:
+    collected.append(url)
+    all.remove(url)
+collected.extend(all)
+print("\n".join(collected))' "$all_urls" "$correct_urls"
+}
+
+make_urls_certbot_ready() {
+  local clean_urls="$1"
+  printf '%s\n' "$(awk 'BEGIN {ORS=" "} {print "-d " $0}' <<<"$clean_urls")"
+}
+
+check_urls() {
+  local clean_urls="$1"
+  declare -i tries=1 max_tries=${2:-${MAX_TRIES:-3}}
+  local reached_urls=''
+  echo 'Checking urls' >&2
+
+  while read -r url; do
+
+    echo "Trying to reach $url" >&2
+    until [ "$tries" -gt "$max_tries" ]; do
+      if curl -sL "$url/.well-known/acme-challenge/availability_test.txt" | grep -qF "$RANDOM_STRING"; then
+        local reached='true'
+        echo "$url/.well-known/acme-challenge/availability_test.txt was reached!" >&2
+        break
+      else
+        local reached='false'
+        echo "$url/.well-known/acme-challenge/availability_test.txt is not reachable. (Try $tries of $max_tries) Waiting 2 seconds ..." >&2
+        ((++tries))
+        sleep 2
+      fi
+    done
+
+    if [ "$reached" = 'true' ]; then
+      reached_urls=$(printf '%s\n%s' "$reached_urls" "$url")
+    fi
+
+  done <<<"$clean_urls"
+  grep -v '^\s*$' <<<"$reached_urls"
+}
+
+get_certificate() {
+  local urls="$1"
+  local expand_option="${2:- }"
 
   # determining if testing certs should be used
   if [ "$TEST_CERT" = 'TRUE' -o "$TEST_CERT" = 'true' -o "$TEST_CERT" = '1' ]; then
@@ -160,25 +235,33 @@ if [ ! -f "/config/keys/letsencrypt/fullchain.pem" ]; then
     TEST_CERT_OPTION=' '
   fi
 
-  # determining if certificate should be expanded
-  if [ "$EXPAND_CERTIFICATE" = 'false' -o "$EXPAND_CERTIFICATE" = 'FALSE' -o "$EXPAND_CERTIFICATE" = '0' ]; then
-    EXPAND_CERTIFICATE_OPTION=' '
-  else
-    EXPAND_CERTIFICATE_OPTION=' --expand '
-  fi
+  declare -i tries=1 max_tries=${MAX_TRIES:-3}
 
   # trying several times to get a certificate
-  declare -i TRIES=1 MAX_TRIES=${MAX_TRIES:-3}
-  until [ "$TRIES" -gt "$MAX_TRIES" ]; do
+  until [ "$tries" -gt "$max_tries" ]; do
 # shellcheck disable=SC2086
-    if certbot certonly $TEST_CERT_OPTION $EXPAND_CERTIFICATE_OPTION --non-interactive --preferred-challenges "${PREFERRED_CHALLENGES:-http,tls-sni}" --renew-by-default --standalone --rsa-key-size 4096 $EMAILPARAM --agree-tos $URLS; then
-      echo "Succeeded at try $TRIES of ${MAX_TRIES}."
+    if certbot certonly $TEST_CERT_OPTION $expand_option --non-interactive --preferred-challenges "${PREFERRED_CHALLENGES:-http,tls-sni}" --rsa-key-size 4096 $EMAILPARAM --agree-tos --webroot -w "$WEBROOT" $urls; then
+      echo "Succeeded at try $tries of ${max_tries}."
+      local got_certificate='true'
       break
     else
-      echo "Try $TRIES of $MAX_TRIES failed."
-      ((++TRIES))
+      echo "Try $tries of $max_tries failed."
+      ((++tries))
     fi
   done
+
+  if [ "$got_certificate" != 'true' ]; then
+    echo 'Could not get a certificate. Not saving the variables for a future run.'
+    DONT_SAVE_VARIABLES='true'
+    return 1
+  fi
+
+  CERT_DIRS=$(find /config/etc/letsencrypt/live/ -mindepth 1 -maxdepth 1 -type d -exec stat -c '%Y %n' {} \; \
+    | sort -rn \
+    | cut -d' ' -f2- \
+    | xargs -n1 -IDIR readlink -f 'DIR')
+  NEWEST_CERT_DIR=$(head -n1 <<<"$CERT_DIRS")
+  ln -s "$NEWEST_CERT_DIR" /config/keys/letsencrypt
 
   cd /config/keys/letsencrypt || exit
   openssl pkcs12 -export -out privkey.pfx -inkey privkey.pem -in cert.pem -certfile chain.pem -passout pass:
@@ -186,14 +269,78 @@ if [ ! -f "/config/keys/letsencrypt/fullchain.pem" ]; then
   # creating concatenated cert for HAProxy
   mkdir -p /haproxy_certs
   cat privkey.pem fullchain.pem  > /haproxy_certs/cert1.pem
+}
 
+URLS_CLEAN=$(clean_urls "$URLS")
+ORIGURLS_CLEAN=$(clean_urls "$ORIGURLS")
+
+if equalset "$ORIGURLS_CLEAN" "$URLS_CLEAN"; then
+  echo 'The urls did not change since the last run (or this run is the first run).'
+  URLS="$ORIGURLS"
+  REACHED_URLS=$(check_urls "$ORIGURLS_CLEAN")
+
+  if equalset "$ORIGURLS_CLEAN" "$REACHED_URLS"; then
+    echo 'All urls are reachable.'
+    if [ ! -f /config/keys/letsencrypt/fullchain.pem ]; then
+      # There is no certificate. Get one.
+      echo 'Getting a new certificate'
+      get_certificate "$URLS"
+    else
+      # There already is a certificate. Renew it.
+      echo 'Renewing the certificate'
+      chmod +x /app/le-renew.sh
+      /app/le-renew.sh
+    fi
+  else
+    printf 'The following urls are not reachable:\n%s\n' "$(diffset "$ORIGURLS_CLEAN" "$REACHED_URLS")"
+    echo 'Aborting and not saving the variables for a future run.'
+    DONT_SAVE_VARIABLES='true'
+  fi
+elif subset "$ORIGURLS_CLEAN" "$URLS_CLEAN"; then
+  echo 'New urls were specified and none of the ones specified before are missing.'
+  printf 'The urls now are:\n%s\n' "$URLS_CLEAN"
+  URLS_CLEAN=$(reorder_urls "$URLS_CLEAN" "$ORIGURLS_CLEAN")
+  REACHED_URLS=$(check_urls "$URLS_CLEAN")
+  if equalset "$URLS_CLEAN" "$REACHED_URLS"; then
+    echo 'All urls are reachable.'
+    echo 'Expanding the certificate for the new domains.'
+    URLS=$(make_urls_certbot_ready "$URLS_CLEAN")
+    get_certificate "$URLS" --expand
+  else
+    printf 'The following urls are not reachable:\n%s\n' "$(diffset "$URLS_CLEAN" "$REACHED_URLS")"
+    echo 'Aborting and not saving the variables for a future run.'
+    DONT_SAVE_VARIABLES='true'
+  fi
 else
-  chmod +x /app/le-renew.sh
-  /app/le-renew.sh
+  MISSING_ORIGURLS=$(diffset "$ORIGURLS_CLEAN" "$URLS_CLEAN")
+  printf 'Warning: The following urls were specified in the last run, but are missing now:\n%s\n' "$MISSING_ORIGURLS"
+  if [ "$REMOVE_OLD_DOMAINS" = 'true' -o "$REMOVE_OLD_DOMAINS" = 'TRUE' -o "$REMOVE_OLD_DOMAINS" = 1 ]; then
+    echo "REMOVE_OLD_DOMAINS is $REMOVE_OLD_DOMAINS; therefore I’m creating a new certificate without the old domains."
+    REACHED_URLS=$(check_urls "$URLS_CLEAN")
+    if equalset "$URLS_CLEAN" "$REACHED_URLS"; then
+      echo 'All urls are reachable.'
+      echo 'Getting a new certificate'
+      URLS=$(make_urls_certbot_ready "$URLS_CLEAN" "$ORIGURLS_CLEAN")
+      get_certificate "$URLS"
+    else
+      printf 'The following urls are not reachable:\n%s\n' "$(diffset "$URLS_CLEAN" "$REACHED_URLS")"
+      echo 'Aborting and not saving the variables for a future run.'
+      DONT_SAVE_VARIABLES='true'
+    fi
+  else
+    echo "REMOVE_OLD_DOMAINS is not true, TRUE or 1; therefore I’m not getting any certificates."
+    echo 'If you want to get a new certificate without the old domains, specify the option REMOVE_OLD_DOMAINS=true on the next run.'
+    DONT_SAVE_VARIABLES='true'
+  fi
 fi
 
+# killing Python server
+kill "$HTTPSERVER_PID"
+
 # saving new variables
-echo -e "ORIGURL=\"$URL\" ORIGSUBDOMAINS=\"$SUBDOMAINS\" ORIGONLY_SUBDOMAINS=\"$ONLY_SUBDOMAINS\" ORIGEXTRA_DOMAINS=\"$EXTRA_DOMAINS\" ORIGDHLEVEL=\"$DHLEVEL\"" > /config/donoteditthisfile.conf
+if [ "$DONT_SAVE_VARIABLES" != true ]; then
+  echo -e "ORIGURL=\"$URL\" ORIGSUBDOMAINS=\"$SUBDOMAINS\" ORIGONLY_SUBDOMAINS=\"$ONLY_SUBDOMAINS\" ORIGEXTRA_DOMAINS=\"$EXTRA_DOMAINS\" ORIGDHLEVEL=\"$DHLEVEL\" ORIGURLS=\"$URLS\"" > /config/donoteditthisfile.conf
+fi
 
 # logfiles needed by fail2ban
 [[ ! -f /config/log/nginx/error.log ]] && \
@@ -208,3 +355,5 @@ chmod -R 0644 /etc/logrotate.d
 
 # Start fail2ban
 fail2ban-client -x start
+
+# vim: ft=sh sts=2 sw=2 et si

@@ -21,7 +21,7 @@ mkdir -p \
 	/config/{log/letsencrypt,log/fail2ban,etc/letsencrypt,fail2ban,crontabs} \
 	/var/run/fail2ban
 rm -rf /etc/letsencrypt
-ln -s /config/etc/letsencrypt /etc/letsencrypt
+ln -sT /config/etc/letsencrypt /etc/letsencrypt
 
 # copy config files
 [[ ! -f /etc/fail2ban/jail.local ]] && \
@@ -113,18 +113,16 @@ CERT_DIRS=$(find /config/etc/letsencrypt/live/ -mindepth 1 -maxdepth 1 -type d -
   | sort -rn \
   | cut -d' ' -f2- \
   | xargs -n1 -IDIR readlink -f 'DIR')
-if [ -n "$CERT_DIRS" ]; then
-  # There is at least one directory in /config/etc/letsencrypt/live/
-  # Choose the newest one
-  NEWEST_CERT_DIR=$(head -n1 <<<"$CERT_DIRS")
-  ln -s "$NEWEST_CERT_DIR" /config/keys/letsencrypt
+if [ -n "$ORIGCERT_NAME" ]; then
+  # There is a certificate already.
+  ln -sfT ../etc/letsencrypt/live/"$ORIGCERT_NAME" /config/keys/letsencrypt
 else
   # There are no certificate directories yet. Use the CN as Let’s Encrypt is going to create that directory.
   if [ "$ONLY_SUBDOMAINS" = "true" ]; then
     DOMAIN="$(echo "$SUBDOMAINS" | tr ',' ' ' | awk '{print $1}').${URL}"
-    ln -s ../etc/letsencrypt/live/"$DOMAIN" /config/keys/letsencrypt
+    ln -sT ../etc/letsencrypt/live/"$DOMAIN" /config/keys/letsencrypt
   else
-    ln -s ../etc/letsencrypt/live/"$URL" /config/keys/letsencrypt
+    ln -sT ../etc/letsencrypt/live/"$URL" /config/keys/letsencrypt
   fi
 fi
 
@@ -240,9 +238,28 @@ get_certificate() {
   # trying several times to get a certificate
   until [ "$tries" -gt "$max_tries" ]; do
 # shellcheck disable=SC2086
-    if certbot certonly $TEST_CERT_OPTION $expand_option --non-interactive --preferred-challenges "${PREFERRED_CHALLENGES:-http,tls-sni}" --rsa-key-size 4096 $EMAILPARAM --agree-tos --webroot -w "$WEBROOT" $urls; then
-      echo "Succeeded at try $tries of ${max_tries}."
-      local got_certificate='true'
+    if local certbot_output=$(certbot certonly $TEST_CERT_OPTION $expand_option --non-interactive --preferred-challenges "${PREFERRED_CHALLENGES:-http,tls-sni}" --rsa-key-size 4096 $EMAILPARAM --agree-tos --webroot -w "$WEBROOT" $urls 2>&1); then
+      printf 'Output of certbot:\n%s\n' "$certbot_output"
+      if grep -qF 'Congratulations' <<<"$certbot_output"; then
+        echo "Succeeded at try $tries of ${max_tries}."
+        local got_certificate='true'
+        CERT_NAME=$(sed -n 's@.*/\([^/]\+\)/fullchain\.pem.*$@\1@p' <<<"$certbot_output")
+        if [ "$CERT_NAME" != "$ORIGCERT_NAME" ]; then
+          echo "CERT_NAME was '$ORIGCERT_NAME' and is now '$CERT_NAME'"
+        else
+          echo "CERT_NAME still is $CERT_NAME"
+        fi
+      elif grep -qF 'Certificate not yet due for renewal' <<<"$certbot_output"; then
+        local dry_run_output=$(certbot --dry-run -v certonly $TEST_CERT_OPTION $expand_option --non-interactive --preferred-challenges "${PREFERRED_CHALLENGES:-http,tls-sni}" --rsa-key-size 4096 $EMAILPARAM --agree-tos --webroot -w "$WEBROOT" $urls 2>&1)
+        #printf 'Output of certbot DRY-RUN:\n%s\n' "$dry_run_output"
+        echo "Succeeded at try $tries of ${max_tries}."
+        local got_certificate='true'
+        CERT_NAME=$(sed -n 's@^.*skipping updating lineage at .*/live/\(.*\)$@\1@p' <<<"$dry_run_output")
+        echo "Reusing the old certificate $CERT_NAME"
+      else
+        echo "Certbot exited with exit code 0, but its output did not contain the word 'Congratulations' or 'Certificate not yet due for renewal'."
+        echo "This should never happen. Aborting."
+      fi
       break
     else
       echo "Try $tries of $max_tries failed."
@@ -256,12 +273,7 @@ get_certificate() {
     return 1
   fi
 
-  CERT_DIRS=$(find /config/etc/letsencrypt/live/ -mindepth 1 -maxdepth 1 -type d -exec stat -c '%Y %n' {} \; \
-    | sort -rn \
-    | cut -d' ' -f2- \
-    | xargs -n1 -IDIR readlink -f 'DIR')
-  NEWEST_CERT_DIR=$(head -n1 <<<"$CERT_DIRS")
-  ln -s "$NEWEST_CERT_DIR" /config/keys/letsencrypt
+  ln -sfT ../etc/letsencrypt/live/"$CERT_NAME" /config/keys/letsencrypt
 
   cd /config/keys/letsencrypt || exit
   openssl pkcs12 -export -out privkey.pfx -inkey privkey.pem -in cert.pem -certfile chain.pem -passout pass:
@@ -290,6 +302,8 @@ if equalset "$ORIGURLS_CLEAN" "$URLS_CLEAN"; then
       echo 'Renewing the certificate'
       chmod +x /app/le-renew.sh
       /app/le-renew.sh
+      echo 'Nothing new. Not saving the variables for a future run.'
+      DONT_SAVE_VARIABLES='true'
     fi
   else
     printf 'The following urls are not reachable:\n%s\n' "$(diffset "$ORIGURLS_CLEAN" "$REACHED_URLS")"
@@ -339,7 +353,7 @@ kill "$HTTPSERVER_PID"
 
 # saving new variables
 if [ "$DONT_SAVE_VARIABLES" != true ]; then
-  echo -e "ORIGURL=\"$URL\" ORIGSUBDOMAINS=\"$SUBDOMAINS\" ORIGONLY_SUBDOMAINS=\"$ONLY_SUBDOMAINS\" ORIGEXTRA_DOMAINS=\"$EXTRA_DOMAINS\" ORIGDHLEVEL=\"$DHLEVEL\" ORIGURLS=\"$URLS\"" > /config/donoteditthisfile.conf
+  echo -e "ORIGURL=\"$URL\" ORIGSUBDOMAINS=\"$SUBDOMAINS\" ORIGONLY_SUBDOMAINS=\"$ONLY_SUBDOMAINS\" ORIGEXTRA_DOMAINS=\"$EXTRA_DOMAINS\" ORIGDHLEVEL=\"$DHLEVEL\" ORIGURLS=\"$URLS\" ORIGCERT_NAME=\"$CERT_NAME\"" > /config/donoteditthisfile.conf
 fi
 
 # logfiles needed by fail2ban
